@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>MLAC OMR Camera Scanner</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0f62fe">
+<style>
+  body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;background:#f6f8fb;color:#0b1220}
+  .card{background:#fff;border-radius:10px;padding:12px;box-shadow:0 6px 18px rgba(12,24,40,0.06);margin:12px}
+  h1{margin:0 0 8px;font-size:18px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  label{font-size:13px;color:#555}
+  input,select,textarea{padding:6px;border-radius:6px;border:1px solid #ddd}
+  textarea{width:100%;min-height:40px;resize:vertical}
+  button{background:#0f62fe;color:white;border:none;padding:8px 12px;border-radius:8px;cursor:pointer}
+  button.secondary{background:#eef3ff;color:#0f62fe;border:1px solid rgba(15,98,254,0.12)}
+  video,canvas{max-width:100%;height:auto;display:block;background:#222;border-radius:8px}
+  #overlay{position:absolute;border:2px dashed rgba(15,98,254,0.9);display:none}
+  table{width:100%;border-collapse:collapse;margin-top:8px}
+  th,td{padding:6px;border-bottom:1px solid #eee;font-size:13px;text-align:left}
+  footer{font-size:12px;color:#666;margin:12px}
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>MLAC OMR Camera Scanner</h1>
+  <small>Configurable rows, choices, and open-ended questions</small>
+</div>
+
+<div class="card">
+  <div class="row">
+    <div><label>Respondent ID:<br><input id="respondentId" type="text" style="width:100px"></label></div>
+    <div><label>Grade Level:<br>
+      <select id="gradeLevel"><option value="">—</option><option>7</option><option>8</option><option>9</option><option>10</option></select>
+    </label></div>
+    <div><label>Sex:<br>
+      <select id="sex"><option value="">—</option><option>Male</option><option>Female</option></select>
+    </label></div>
+    <div><label>Age:<br><input id="age" type="number" min="5" max="99" style="width:70px"></label></div>
+  </div>
+  <hr>
+  <div class="row">
+    <div><label>Rows (questions):<br><input id="numRows" type="number" value="20" style="width:70px"></label></div>
+    <div><label>Choices per row:<br><input id="numChoices" type="number" value="4" style="width:70px"></label></div>
+    <div><label>Open-ended fields:<br><input id="numOpen" type="number" value="3" style="width:70px"></label></div>
+    <div><label>Threshold:<br><input id="threshold" type="number" value="0.35" step="0.05" style="width:70px"></label></div>
+    <div style="margin-left:auto">
+      <button id="startCam">Start Camera</button>
+      <button id="stopCam" class="secondary">Stop</button>
+    </div>
+  </div>
+</div>
+
+<div id="openFields" class="card"></div>
+
+<div class="card" style="padding:0">
+  <strong style="padding:12px;display:block">Live Camera</strong>
+  <video id="video" autoplay playsinline style="width:100%;max-height:70vh;object-fit:cover;border-radius:0"></video>
+  <div style="padding:12px"><button id="captureBtn">Capture</button></div>
+</div>
+
+<div class="card">
+  <strong>Captured Image</strong>
+  <canvas id="sheetCanvas" width="800" height="1000"></canvas>
+  <div id="overlay"></div>
+  <div class="row" style="margin-top:6px">
+    <button id="autoFit" class="secondary">Auto-fit</button>
+    <button id="detectAll">Detect All</button>
+    <button id="saveRespondent">Save Respondent</button>
+    <button id="clearCapture" class="secondary">Clear</button>
+  </div>
+</div>
+
+<div class="card" id="resultsCard" style="display:none">
+  <h3>Saved Responses (<span id="savedCount">0</span>)</h3>
+  <table id="savedTable"><thead>
+    <tr id="headerRow"></tr>
+  </thead><tbody></tbody></table>
+  <button id="exportAll">Export All CSV</button>
+  <button id="clearAll" class="secondary">Clear All</button>
+</div>
+
+<footer class="card">
+  <small>All local. Supports any questionnaire with configurable settings.<br>© 2025 MLAC Scanner</small>
+</footer>
+
+<script>
+const video=document.getElementById('video'),sheetCanvas=document.getElementById('sheetCanvas'),ctx=sheetCanvas.getContext('2d');
+const overlay=document.getElementById('overlay');
+let stream=null,imgLoaded=false,overlayState={x:50,y:50,w:600,h:40},currentResults=[],allResponses=[];
+
+function isMobile(){return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);}
+
+// dynamic open fields
+function renderOpenFields(){
+  const n=+document.getElementById('numOpen').value||0;
+  const div=document.getElementById('openFields');
+  div.innerHTML="<strong>Open-Ended Responses</strong>";
+  for(let i=1;i<=n;i++){
+    div.innerHTML+=`<label>${i}. <textarea id="open${i}"></textarea></label><br>`;
+  }
+}
+document.getElementById('numOpen').addEventListener('change',renderOpenFields);
+renderOpenFields();
+
+function updateOverlay(){overlay.style.left=overlayState.x+"px";overlay.style.top=overlayState.y+"px";overlay.style.width=overlayState.w+"px";overlay.style.height=overlayState.h+"px";overlay.style.position="absolute";overlay.style.display=imgLoaded?"block":"none"}
+
+document.getElementById('startCam').onclick=async()=>{
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } } // prefer back camera
+    });
+    video.srcObject = stream;
+  } catch(e) {
+    alert("Camera access denied or back cam not available: " + e);
+  }
+};
+
+document.getElementById('stopCam').onclick=()=>{if(stream){stream.getTracks().forEach(t=>t.stop());video.srcObject=null}};
+document.getElementById('captureBtn').onclick=()=>{if(!video.srcObject){alert("Start camera first");return;}sheetCanvas.width=video.videoWidth;sheetCanvas.height=video.videoHeight;ctx.drawImage(video,0,0,sheetCanvas.width,sheetCanvas.height);imgLoaded=true;updateOverlay()};
+document.getElementById('autoFit').onclick=()=>{if(imgLoaded){overlayState={x:sheetCanvas.width*0.1,y:sheetCanvas.height*0.2,w:sheetCanvas.width*0.8,h:Math.max(40,sheetCanvas.height*0.04)};updateOverlay()}};
+function sampleDark(x,y,w,h){const d=ctx.getImageData(x,y,w,h).data;let sum=0;for(let i=0;i<d.length;i+=4){sum+=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];}return 1-(sum/(d.length/4))/255}
+
+// Reverse order detection (4 → 3 → 2 → 1)
+document.getElementById('detectAll').onclick=()=>{
+  if(!imgLoaded)return;
+  const rows=+document.getElementById('numRows').value||20,
+        choices=+document.getElementById('numChoices').value||4,
+        thr=+document.getElementById('threshold').value||0.35;
+  currentResults=[];
+  for(let r=0;r<rows;r++){
+    let vals=[],cellW=overlayState.w/choices;
+    for(let c=0;c<choices;c++){
+      vals.push(sampleDark(
+        overlayState.x+(choices-1-c)*cellW,
+        overlayState.y+r*overlayState.h,
+        cellW,
+        overlayState.h
+      ));
+    }
+    let max=Math.max(...vals);
+    currentResults.push(max>=thr?vals.indexOf(max)+1:"");
+  }
+  alert("Detected: "+currentResults.join(","));
+};
+
+document.getElementById('saveRespondent').onclick=()=>{
+  if(!currentResults.length){alert("Detect answers first");return;}
+  const rid=document.getElementById('respondentId').value||("R"+(allResponses.length+1)),
+        grade=document.getElementById('gradeLevel').value,
+        sex=document.getElementById('sex').value,
+        age=document.getElementById('age').value;
+  let openFields={};
+  const n=+document.getElementById('numOpen').value||0;
+  for(let i=1;i<=n;i++){openFields["open"+i]=document.getElementById('open'+i).value.replace(/,/g,";")}
+  allResponses.push({id:rid,grade,sex,age,open:openFields,answers:[...currentResults]});
+  renderTable();
+};
+function renderTable(){
+  const tbody=document.querySelector("#savedTable tbody");
+  tbody.innerHTML="";
+  const nOpen=+document.getElementById('numOpen').value||0,
+        maxQ=Math.max(...allResponses.map(r=>r.answers.length));
+  const header=document.getElementById("headerRow");
+  header.innerHTML="<th>ID</th><th>Grade</th><th>Sex</th><th>Age</th>";
+  for(let i=1;i<=nOpen;i++)header.innerHTML+=`<th>Open${i}</th>`;
+  for(let i=1;i<=maxQ;i++)header.innerHTML+=`<th>Q${i}</th>`;
+  allResponses.forEach(r=>{
+    const tr=document.createElement("tr");
+    let html=`<td>${r.id}</td><td>${r.grade}</td><td>${r.sex}</td><td>${r.age}</td>`;
+    for(let i=1;i<=nOpen;i++)html+=`<td>${r.open["open"+i]||""}</td>`;
+    for(let i=0;i<maxQ;i++)html+=`<td>${r.answers[i]??""}</td>`;
+    tr.innerHTML=html;
+    tbody.appendChild(tr)
+  });
+  document.getElementById('resultsCard').style.display="block";
+  document.getElementById('savedCount').textContent=allResponses.length
+}
+document.getElementById('clearCapture').onclick=()=>{ctx.clearRect(0,0,sheetCanvas.width,sheetCanvas.height);imgLoaded=false;overlay.style.display='none';currentResults=[]};
+document.getElementById('exportAll').onclick=()=>{
+  if(!allResponses.length){alert("No data");return;}
+  const nOpen=+document.getElementById('numOpen').value||0,
+        maxQ=Math.max(...allResponses.map(r=>r.answers.length));
+  let headers=["RespondentID","GradeLevel","Sex","Age"];
+  for(let i=1;i<=nOpen;i++)headers.push("Open"+i);
+  for(let i=1;i<=maxQ;i++)headers.push("Q"+i);
+  let rows=[headers.join(",")];
+  allResponses.forEach(r=>{
+    let row=[r.id,r.grade,r.sex,r.age];
+    for(let i=1;i<=nOpen;i++)row.push(r.open["open"+i]||"");
+    for(let i=0;i<maxQ;i++)row.push(r.answers[i]??"");
+    rows.push(row.join(","))
+  });
+  const blob=new Blob([rows.join("\n")],{type:"text/csv"}),
+        url=URL.createObjectURL(blob),
+        a=document.createElement("a");
+  a.href=url;a.download="survey_results.csv";a.click();
+  URL.revokeObjectURL(url)
+};
+document.getElementById('clearAll').onclick=()=>{if(confirm("Clear all?")){allResponses=[];document.querySelector("#savedTable tbody").innerHTML="";document.getElementById('savedCount').textContent="0";document.getElementById('resultsCard').style.display="none"}};
+
+// Register service worker
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(err => console.log('SW failed:', err));
+}
+</script>
+</body>
+</html>
